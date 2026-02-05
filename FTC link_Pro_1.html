@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FTC-Link Pro v1.0</title>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        :root { --primary: #2c3e50; --accent: #27ae60; --danger: #e74c3c; }
+        body { font-family: -apple-system, sans-serif; margin: 0; background: #f8f9fa; color: #333; }
+        .header { background: var(--primary); color: white; padding: 15px; text-align: center; font-size: 1.2rem; }
+        .panel { padding: 15px; background: white; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        input { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        #reader { width: 100%; border-radius: 8px; overflow: hidden; }
+        .card { display: none; padding: 15px; background: #fff; margin: 10px; border-radius: 10px; border-left: 5px solid var(--accent); }
+        .btn { background: var(--accent); color: white; border: none; width: 100%; padding: 15px; border-radius: 8px; font-size: 1rem; margin-top: 10px; cursor: pointer; }
+        #photo-preview { width: 100%; border-radius: 8px; margin-top: 10px; display: none; }
+        .log-status { text-align: center; font-size: 0.8rem; color: #888; margin: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="header">FTC-Link Pro v1.0</div>
+
+<div class="panel">
+    <input type="text" id="theme" placeholder="Project Theme (e.g. AH27 Burton)">
+    <input type="text" id="client" placeholder="Client Name (e.g. Burton)">
+</div>
+
+<div id="reader"></div>
+
+<div id="result-card" class="card">
+    <div id="data-display" style="line-height: 1.6;"></div>
+    <button class="btn" style="background:#3498db" onclick="triggerCamera()">📸 Take Fabric Photo</button>
+    <input type="file" id="cam-input" accept="image/*" capture="environment" style="display:none">
+    <img id="photo-preview">
+    <button class="btn" id="sync-btn" onclick="uploadData()">Confirm & Sync to Cloud</button>
+</div>
+
+<div class="log-status" id="status">System Standby (Offline Ready)</div>
+
+<script>
+    let currentItem = null;
+    let base64Image = null;
+    const GAS_URL = "在此處貼上您的GOOGLE_DEPLOYMENT_URL"; 
+
+    // 初始化掃描器
+    const scanner = new Html5Qrcode("reader");
+    scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan);
+
+    function onScan(text) {
+        if (!text.includes("FORMOSA TAFFETA")) return;
+        
+        // 解析標籤格式
+        const parts = text.split('#');
+        currentItem = {
+            item: `${parts[1]}-${parts[2]}`,
+            seq: parts[3],
+            width: parts[5].replace('inch', '"'),
+            gsm: parts[6].replace('g/sqm', ''),
+            gyd: parts[7].replace('g/yard', ''),
+            content: parts[8],
+            remark: parts[9]
+        };
+
+        document.getElementById('result-card').style.display = 'block';
+        document.getElementById('data-display').innerHTML = `
+            <b>ITEM:</b> ${currentItem.item} | <b>SEQ:</b> ${currentItem.seq}<br>
+            <b>Spec:</b> ${currentItem.width}, ${currentItem.gsm}g/sm, ${currentItem.gyd}g/yd<br>
+            <b>Content:</b> ${currentItem.content}<br>
+            <b>Remark:</b> ${currentItem.remark}
+        `;
+        window.scrollTo(0, document.body.scrollHeight);
+    }
+
+    function triggerCamera() { document.getElementById('cam-input').click(); }
+
+    document.getElementById('cam-input').onchange = function(e) {
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        reader.onload = function(f) {
+            base64Image = f.target.result;
+            const img = document.getElementById('photo-preview');
+            img.src = base64Image;
+            img.style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+    };
+
+    async function uploadData() {
+        const status = document.getElementById('status');
+        const payload = {
+            ...currentItem,
+            theme: document.getElementById('theme').value || "Untagged",
+            client: document.getElementById('client').value || "General",
+            image: base64Image
+        };
+
+        status.innerText = "Connecting to Cloud...";
+        
+        try {
+            const response = await fetch(GAS_URL, {
+                method: 'POST',
+                mode: 'no-cors', // GAS 跨網域限制
+                body: JSON.stringify(payload)
+            });
+            alert("Data & Photo Sent!");
+            resetSystem();
+        } catch (err) {
+            localStorage.setItem('offline_item', JSON.stringify(payload));
+            alert("Saved to Offline Cache!");
+        }
+    }
+
+    function resetSystem() {
+        document.getElementById('result-card').style.display = 'none';
+        document.getElementById('photo-preview').style.display = 'none';
+        base64Image = null;
+        status.innerText = "Ready for next scan";
+    }
+</script>
+</body>
+</html>
