@@ -49,19 +49,51 @@
     scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan);
 
     function onScan(text) {
+        // 1. 基礎檢查：確認是福懋標籤
         if (!text.includes("FORMOSA TAFFETA")) return;
+
+        let parts;
         
-        // 解析標籤格式
-        const parts = text.split('#');
+        // 2. 自動偵測分隔符號 (兼容 ^ 與 #)
+        // 這樣 PUMA (舊) 和 Burton (新) 的專案都能掃
+        if (text.includes('^')) {
+            parts = text.split('^'); 
+        } else if (text.includes('#')) {
+            parts = text.split('#'); 
+        } else {
+            return; // 格式不符，不處理
+        }
+
+        // 小工具：清除資料前後的空白 (例如 "CY625 " 變成 "CY625")
+        const clean = (str) => str ? str.trim() : "";
+
+        // 3. 智能解析
         currentItem = {
-            item: `${parts[1]}-${parts[2]}`,
-            seq: parts[3],
-            width: parts[5].replace('inch', '"'),
-            gsm: parts[6].replace('g/sqm', ''),
-            gyd: parts[7].replace('g/yard', ''),
-            content: parts[8],
-            remark: parts[9]
+            item: `${clean(parts[1])}-${clean(parts[2])}`,
+            seq: clean(parts[3]),
+            // 自動處理 "inch" 和 "g/sqm" 單位
+            width: clean(parts[5]).replace('inch', '').replace('"', ''), 
+            gsm: clean(parts[6]).replace('g/sqm', ''),
+            gyd: clean(parts[7]).replace('g/yard', ''),
+            content: clean(parts[8]),
+            remark: clean(parts[9])
         };
+
+        // 4. 顯示結果到卡片上
+        document.getElementById('result-card').style.display = 'block';
+        document.getElementById('data-display').innerHTML = `
+            <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;">
+                <b>ITEM:</b> ${currentItem.item}
+            </div>
+            <b>SEQ:</b> ${currentItem.seq} <br>
+            <b>Spec:</b> ${currentItem.width}", ${currentItem.gsm}g/m², ${currentItem.gyd}g/y <br>
+            <b>Content:</b> ${currentItem.content} <br>
+            <div style="margin-top:5px; color:#e67e22; font-size:0.9em;">
+                <b>Remark:</b> ${currentItem.remark}
+            </div>
+        `;
+        window.scrollTo(0, document.body.scrollHeight);
+    }
 
         document.getElementById('result-card').style.display = 'block';
         document.getElementById('data-display').innerHTML = `
@@ -121,4 +153,5 @@
 </script>
 </body>
 </html>
+
 
