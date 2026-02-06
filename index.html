@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FTC-Link Pro v1.0</title>
+    <title>FTC-Link Pro v1.1</title>
     <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
         :root { --primary: #2c3e50; --accent: #27ae60; --danger: #e74c3c; }
@@ -11,7 +11,10 @@
         .header { background: var(--primary); color: white; padding: 15px; text-align: center; font-size: 1.2rem; }
         .panel { padding: 15px; background: white; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         input { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
-        #reader { width: 100%; border-radius: 8px; overflow: hidden; }
+        
+        /* 修改：預設給一個高度與黑色背景，確保即使相機沒開也看得到位置 */
+        #reader { width: 100%; min-height: 300px; background: #000; border-radius: 8px; overflow: hidden; position: relative; }
+        
         .card { display: none; padding: 15px; background: #fff; margin: 10px; border-radius: 10px; border-left: 5px solid var(--accent); }
         .btn { background: var(--accent); color: white; border: none; width: 100%; padding: 15px; border-radius: 8px; font-size: 1rem; margin-top: 10px; cursor: pointer; }
         #photo-preview { width: 100%; border-radius: 8px; margin-top: 10px; display: none; }
@@ -20,7 +23,7 @@
 </head>
 <body>
 
-<div class="header">FTC-Link Pro v1.0</div>
+<div class="header">FTC-Link Pro v1.1</div>
 
 <div class="panel">
     <input type="text" id="theme" placeholder="Project Theme (e.g. AH27 Burton)">
@@ -42,32 +45,35 @@
 <script>
     let currentItem = null;
     let base64Image = null;
-    // 注意：請確認這是您最新的 GAS 網址
+    
+    // 請確認這行網址是正確的
     const GAS_URL = "https://script.google.com/macros/s/AKfycby1aot6Tp1n4JonqL2zXrNypt3kgbSGvEawUfD7JpUnH9HNjiR9_V0Zs5LfPDQOiPRB/exec"; 
 
     // 初始化掃描器
     const scanner = new Html5Qrcode("reader");
-    scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan);
+    
+    // 啟動相機 (加入錯誤偵測功能)
+    scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan)
+    .catch(err => {
+        // 如果相機啟動失敗，會彈出視窗告訴你原因
+        alert("相機啟動失敗: " + err);
+    });
 
     function onScan(text) {
-        // 1. 基礎檢查：確認是福懋標籤
         if (!text.includes("FORMOSA TAFFETA")) return;
 
         let parts;
-        
-        // 2. 自動偵測分隔符號 (兼容 ^ 與 #)
+        // 兼容舊版 (#) 與新版 (^) 格式
         if (text.includes('^')) {
             parts = text.split('^'); 
         } else if (text.includes('#')) {
             parts = text.split('#'); 
         } else {
-            return; // 格式不符
+            return; 
         }
 
-        // 小工具：清除資料前後的空白
         const clean = (str) => str ? str.trim() : "";
 
-        // 3. 智能解析
         currentItem = {
             item: `${clean(parts[1])}-${clean(parts[2])}`,
             seq: clean(parts[3]),
@@ -78,7 +84,6 @@
             remark: clean(parts[9])
         };
 
-        // 4. 顯示結果 (這裡確保只顯示一次)
         document.getElementById('result-card').style.display = 'block';
         document.getElementById('data-display').innerHTML = `
             <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;">
@@ -100,4 +105,45 @@
         const file = e.target.files[0];
         const reader = new FileReader();
         reader.onload = function(f) {
-            base64Image = f
+            base64Image = f.target.result;
+            const img = document.getElementById('photo-preview');
+            img.src = base64Image;
+            img.style.display = 'block';
+        };
+        reader.readAsDataURL(file);
+    };
+
+    async function uploadData() {
+        const status = document.getElementById('status');
+        const payload = {
+            ...currentItem,
+            theme: document.getElementById('theme').value || "Untagged",
+            client: document.getElementById('client').value || "General",
+            image: base64Image
+        };
+
+        status.innerText = "Connecting to Cloud...";
+        
+        try {
+            const response = await fetch(GAS_URL, {
+                method: 'POST',
+                mode: 'no-cors',
+                body: JSON.stringify(payload)
+            });
+            alert("Data & Photo Sent!");
+            resetSystem();
+        } catch (err) {
+            localStorage.setItem('offline_item', JSON.stringify(payload));
+            alert("Saved to Offline Cache!");
+        }
+    }
+
+    function resetSystem() {
+        document.getElementById('result-card').style.display = 'none';
+        document.getElementById('photo-preview').style.display = 'none';
+        base64Image = null;
+        document.getElementById('status').innerText = "Ready for next scan";
+    }
+</script>
+</body>
+</html>
