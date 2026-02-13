@@ -3,41 +3,57 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FTC-Link Pro v1.1</title>
+    <title>FTC-Link Pro v1.2</title>
     <script src="https://unpkg.com/html5-qrcode"></script>
     <style>
-        :root { --primary: #2c3e50; --accent: #27ae60; --danger: #e74c3c; }
+        :root { --primary: #2c3e50; --accent: #27ae60; --danger: #e74c3c; --warning: #f39c12; }
         body { font-family: -apple-system, sans-serif; margin: 0; background: #f8f9fa; color: #333; }
         .header { background: var(--primary); color: white; padding: 15px; text-align: center; font-size: 1.2rem; }
         .panel { padding: 15px; background: white; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         input { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
         
-        /* 修改：預設給一個高度與黑色背景，確保即使相機沒開也看得到位置 */
+        /* 掃描器區域 */
         #reader { width: 100%; min-height: 300px; background: #000; border-radius: 8px; overflow: hidden; position: relative; }
         
         .card { display: none; padding: 15px; background: #fff; margin: 10px; border-radius: 10px; border-left: 5px solid var(--accent); }
         .btn { background: var(--accent); color: white; border: none; width: 100%; padding: 15px; border-radius: 8px; font-size: 1rem; margin-top: 10px; cursor: pointer; }
+        
+        /* 新增：手動模式按鈕樣式 */
+        .manual-btn { background: var(--warning); color: white; margin-top: 15px; }
+        
         #photo-preview { width: 100%; border-radius: 8px; margin-top: 10px; display: none; }
         .log-status { text-align: center; font-size: 0.8rem; color: #888; margin: 10px; }
+        
+        /* 手動輸入框專用樣式 */
+        .manual-input { border: 2px dashed #bdc3c7; background: #ecf0f1; font-weight: bold; color: #2c3e50; }
     </style>
 </head>
 <body>
 
-<div class="header">FTC-Link Pro v1.1</div>
+<div class="header">FTC-Link Pro v1.2</div>
 
 <div class="panel">
     <input type="text" id="theme" placeholder="Project Theme (e.g. AH27 Burton)">
     <input type="text" id="client" placeholder="Client Name (e.g. Burton)">
 </div>
 
-<div id="reader"></div>
+<div id="scan-container">
+    <div id="reader"></div>
+    <div style="text-align: center;">
+        <button class="btn manual-btn" onclick="enableManualMode()">📝 No QR Code (Manual Input)</button>
+    </div>
+</div>
 
 <div id="result-card" class="card">
     <div id="data-display" style="line-height: 1.6;"></div>
+    
     <button class="btn" style="background:#3498db" onclick="triggerCamera()">📸 Take Fabric Photo</button>
     <input type="file" id="cam-input" accept="image/*" capture="environment" style="display:none">
     <img id="photo-preview">
+    
     <button class="btn" id="sync-btn" onclick="uploadData()">Confirm & Sync to Cloud</button>
+    
+    <button class="btn" style="background:#95a5a6; margin-top:10px;" onclick="resetSystem()">🔄 Reset / Next Scan</button>
 </div>
 
 <div class="log-status" id="status">System Standby (Offline Ready)</div>
@@ -45,19 +61,24 @@
 <script>
     let currentItem = null;
     let base64Image = null;
+    let isManualMode = false; // 標記目前是否為手動模式
     
-    // 請確認這行網址是正確的
+    // 請確認這是您最新的 GAS 網址 (如果之前有變動，請在這裡更新)
     const GAS_URL = "https://script.google.com/macros/s/AKfycby1aot6Tp1n4JonqL2zXrNypt3kgbSGvEawUfD7JpUnH9HNjiR9_V0Zs5LfPDQOiPRB/exec"; 
 
     // 初始化掃描器
     const scanner = new Html5Qrcode("reader");
     
-    // 啟動相機 (加入錯誤偵測功能)
-    scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan)
-    .catch(err => {
-        // 如果相機啟動失敗，會彈出視窗告訴你原因
-        alert("相機啟動失敗: " + err);
-    });
+    // 啟動相機
+    function startScanner() {
+        scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan)
+        .catch(err => {
+            console.log("Scanner info: " + err);
+        });
+    }
+    
+    // 頁面載入時自動啟動掃描
+    startScanner();
 
     function onScan(text) {
         if (!text.includes("FORMOSA TAFFETA")) return;
@@ -74,6 +95,7 @@
 
         const clean = (str) => str ? str.trim() : "";
 
+        // 設定掃描到的資料
         currentItem = {
             item: `${clean(parts[1])}-${clean(parts[2])}`,
             seq: clean(parts[3]),
@@ -83,6 +105,35 @@
             content: clean(parts[8]),
             remark: clean(parts[9])
         };
+
+        isManualMode = false;
+        showResultCard();
+    }
+
+    // 啟動手動輸入模式
+    function enableManualMode() {
+        // 暫停掃描器以節省資源 (如果正在執行)
+        try { scanner.stop(); } catch(e) {}
+        document.getElementById('scan-container').style.display = 'none'; // 隱藏掃描畫面
+        
+        isManualMode = true;
+        
+        // 顯示結果卡片，但插入輸入框
+        document.getElementById('result-card').style.display = 'block';
+        document.getElementById('data-display').innerHTML = `
+            <div style="font-size:1.1em; color:#f39c12; margin-bottom:10px;">
+                <b>✍️ Manual Input Mode</b>
+            </div>
+            <input type="text" id="manual-item" class="manual-input" placeholder="Item No. (e.g. U6817)">
+            <input type="text" id="manual-remark" placeholder="Note / Remark">
+        `;
+    }
+
+    // 顯示掃描結果的 UI 函數
+    function showResultCard() {
+        // 隱藏掃描器
+        document.getElementById('scan-container').style.display = 'none';
+        try { scanner.stop(); } catch(e) {}
 
         document.getElementById('result-card').style.display = 'block';
         document.getElementById('data-display').innerHTML = `
@@ -96,7 +147,6 @@
                 <b>Remark:</b> ${currentItem.remark}
             </div>
         `;
-        window.scrollTo(0, document.body.scrollHeight);
     }
 
     function triggerCamera() { document.getElementById('cam-input').click(); }
@@ -115,12 +165,37 @@
 
     async function uploadData() {
         const status = document.getElementById('status');
-        const payload = {
-            ...currentItem,
-            theme: document.getElementById('theme').value || "Untagged",
-            client: document.getElementById('client').value || "General",
-            image: base64Image
-        };
+        let payload = {};
+
+        // 判斷是手動輸入還是掃描資料
+        if (isManualMode) {
+            const mItem = document.getElementById('manual-item').value;
+            if (!mItem && !base64Image) {
+                alert("Please enter at least an Item No or take a photo.");
+                return;
+            }
+            
+            payload = {
+                item: mItem || "No-Item-Code",
+                seq: "",
+                width: "",
+                gsm: "",
+                gyd: "",
+                content: "",
+                remark: document.getElementById('manual-remark').value || "Manual Input",
+                theme: document.getElementById('theme').value || "Untagged",
+                client: document.getElementById('client').value || "General",
+                image: base64Image
+            };
+        } else {
+            // 掃描模式
+            payload = {
+                ...currentItem,
+                theme: document.getElementById('theme').value || "Untagged",
+                client: document.getElementById('client').value || "General",
+                image: base64Image
+            };
+        }
 
         status.innerText = "Connecting to Cloud...";
         
@@ -135,14 +210,23 @@
         } catch (err) {
             localStorage.setItem('offline_item', JSON.stringify(payload));
             alert("Saved to Offline Cache!");
+            resetSystem();
         }
     }
 
     function resetSystem() {
+        // 重置所有變數與介面
+        currentItem = null;
+        base64Image = null;
+        isManualMode = false;
+        
         document.getElementById('result-card').style.display = 'none';
         document.getElementById('photo-preview').style.display = 'none';
-        base64Image = null;
+        document.getElementById('scan-container').style.display = 'block'; // 重新顯示掃描器
         document.getElementById('status').innerText = "Ready for next scan";
+        
+        // 重新啟動掃描器
+        startScanner();
     }
 </script>
 </body>
