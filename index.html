@@ -163,6 +163,7 @@
         reader.readAsDataURL(file);
     };
 
+    // 🏆 修改後的上傳與畫面狀態控制邏輯
     async function uploadData() {
         const status = document.getElementById('status');
         let payload = {};
@@ -171,7 +172,9 @@
         if (isManualMode) {
             const mItem = document.getElementById('manual-item').value;
             if (!mItem && !base64Image) {
-                alert("Please enter at least an Item No or take a photo.");
+                // 替換手動輸入沒填資料的 alert
+                status.innerHTML = "<span style='color: #e74c3c; font-weight: bold;'>⚠️ Please enter Item No or take a photo.</span>";
+                setTimeout(() => { status.innerText = "Ready for input"; }, 2000);
                 return;
             }
             
@@ -197,7 +200,7 @@
             };
         }
 
-        status.innerText = "Connecting to Cloud...";
+        status.innerHTML = "<span style='color: #3498db; font-weight: bold;'>⏳ Connecting to Cloud...</span>";
         
         try {
             const response = await fetch(GAS_URL, {
@@ -205,12 +208,15 @@
                 mode: 'no-cors',
                 body: JSON.stringify(payload)
             });
-            alert("Data & Photo Sent!");
-            resetSystem();
+            // 替換傳送成功的 alert，改為文字並延遲 1.5 秒自動重置
+            status.innerHTML = "<span style='color: #27ae60; font-weight: bold;'>✅ Data & Photo Sent!</span>";
+            setTimeout(() => { resetSystem(); }, 1500); 
+
         } catch (err) {
             localStorage.setItem('offline_item', JSON.stringify(payload));
-            alert("Saved to Offline Cache!");
-            resetSystem();
+            // 替換離線儲存的 alert，改為文字並延遲 1.5 秒自動重置
+            status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache!</span>";
+            setTimeout(() => { resetSystem(); }, 1500);
         }
     }
 
