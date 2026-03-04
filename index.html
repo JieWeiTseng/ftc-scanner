@@ -61,25 +61,31 @@
     let base64Image = null;
     let isManualMode = false;
     let webCamStream = null;
-    let isScannerRunning = false; // 🛡️ 新增：追蹤掃描器硬體狀態
+    let isScannerRunning = false; 
     
     // 請確認 GAS 網址是否正確
     const GAS_URL = "https://script.google.com/macros/s/AKfycby1aot6Tp1n4JonqL2zXrNypt3kgbSGvEawUfD7JpUnH9HNjiR9_V0Zs5LfPDQOiPRB/exec"; 
 
     const scanner = new Html5Qrcode("reader");
     
-    // 🛡️ 安全啟動掃描器
     function startScanner() {
-        if (isScannerRunning) return; // 避免重複啟動導致當機
+        if (isScannerRunning) return; 
         scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan)
         .then(() => { isScannerRunning = true; })
         .catch(err => { console.log("Scanner start err: " + err); });
     }
 
-    // 🛡️ 安全停止掃描器
-    function stopScannerSafe() {
+    // 🏆 修復關鍵 1：把停止掃描器變成「非同步(async)」，並強迫等待 0.3 秒讓硬體釋放鏡頭
+    async function stopScannerSafe() {
         if (isScannerRunning) {
-            scanner.stop().then(() => { isScannerRunning = false; }).catch(err => console.log(err));
+            try {
+                await scanner.stop();
+                isScannerRunning = false;
+                // 強制等待 300 毫秒，確保 Android 系統徹底放開鏡頭硬體
+                await new Promise(resolve => setTimeout(resolve, 300));
+            } catch (err) {
+                console.log("Stop scanner err: " + err);
+            }
         }
     }
     
@@ -107,8 +113,9 @@
         showResultCard();
     }
 
-    function enableManualMode() {
-        stopScannerSafe(); // 確保關閉鏡頭
+    // 🏆 修復關鍵 2：切換手動模式時，等待鏡頭關閉
+    async function enableManualMode() {
+        await stopScannerSafe(); 
         document.getElementById('scan-container').style.display = 'none';
         isManualMode = true;
         document.getElementById('result-card').style.display = 'block';
@@ -119,9 +126,10 @@
         `;
     }
 
-    function showResultCard() {
+    // 🏆 修復關鍵 3：顯示結果卡片時，等待鏡頭關閉
+    async function showResultCard() {
         document.getElementById('scan-container').style.display = 'none';
-        stopScannerSafe(); // 確保關閉鏡頭
+        await stopScannerSafe(); 
         document.getElementById('result-card').style.display = 'block';
         document.getElementById('data-display').innerHTML = `
             <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;"><b>ITEM:</b> ${currentItem.item}</div>
@@ -132,15 +140,17 @@
         `;
     }
 
+    // 🏆 修復關鍵 4：開啟拍照前，確保條碼機已完全釋放鏡頭
     async function openWebCamera() {
-        stopScannerSafe(); // 切換到拍照相機前，一定要徹底放開條碼相機
+        await stopScannerSafe(); 
         document.getElementById('camera-modal').style.display = 'flex';
         try {
             webCamStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
             document.getElementById('web-cam-vid').srcObject = webCamStream;
         } catch (err) {
-            alert("Camera access failed: " + err);
-            closeWebCamera();
+            // 如果還是搶不到鏡頭，顯示錯誤訊息在畫面上
+            document.getElementById('status').innerHTML = "<span style='color: #e74c3c;'>Camera locked by system. Please restart APP.</span>";
+            setTimeout(closeWebCamera, 2000);
         }
     }
 
@@ -203,7 +213,7 @@
                 method: 'POST', mode: 'no-cors', body: JSON.stringify(payload)
             });
             status.innerHTML = "<span style='color: #27ae60; font-weight: bold;'>✅ Data & Photo Sent!</span>";
-            setTimeout(() => { resetSystem(); }, 1500);  // 確保 1.5 秒後執行重置
+            setTimeout(() => { resetSystem(); }, 1500);  
         } catch (err) {
             localStorage.setItem('offline_item', JSON.stringify(payload));
             status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache!</span>";
@@ -212,7 +222,6 @@
     }
 
     function resetSystem() {
-        // 🛡️ 使用 try-catch 包覆，避免任何介面遺失導致的隱形當機
         try {
             currentItem = null; 
             base64Image = null; 
@@ -230,7 +239,9 @@
             const stat = document.getElementById('status');
             if(stat) stat.innerText = "Ready for next scan";
             
-            startScanner(); // 安全重啟掃描器
+            // 重要：回到首頁時重新啟動條碼掃描器
+            setTimeout(() => { startScanner(); }, 500);
+            
         } catch (err) {
             console.log("Reset Error: " + err);
         }
