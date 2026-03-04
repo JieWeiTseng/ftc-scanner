@@ -12,19 +12,12 @@
         .panel { padding: 15px; background: white; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
         input { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
         
-        /* 掃描器區域 */
         #reader { width: 100%; min-height: 300px; background: #000; border-radius: 8px; overflow: hidden; position: relative; }
-        
         .card { display: none; padding: 15px; background: #fff; margin: 10px; border-radius: 10px; border-left: 5px solid var(--accent); }
         .btn { background: var(--accent); color: white; border: none; width: 100%; padding: 15px; border-radius: 8px; font-size: 1rem; margin-top: 10px; cursor: pointer; }
-        
-        /* 新增：手動模式按鈕樣式 */
         .manual-btn { background: var(--warning); color: white; margin-top: 15px; }
-        
         #photo-preview { width: 100%; border-radius: 8px; margin-top: 10px; display: none; }
         .log-status { text-align: center; font-size: 0.8rem; color: #888; margin: 10px; }
-        
-        /* 手動輸入框專用樣式 */
         .manual-input { border: 2px dashed #bdc3c7; background: #ecf0f1; font-weight: bold; color: #2c3e50; }
     </style>
 </head>
@@ -47,56 +40,59 @@
 <div id="result-card" class="card">
     <div id="data-display" style="line-height: 1.6;"></div>
     
-<div style="position: relative; overflow: hidden; margin-top: 10px; border-radius: 8px;">
-        <div class="btn" style="background:#3498db; margin-top: 0; text-align: center; width: 100%; box-sizing: border-box;">📸 Take Fabric Photo</div>
-        <input type="file" id="cam-input" accept="image/*" capture="environment" style="position: absolute; top: 0; right: 0; bottom: 0; left: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; z-index: 10;">
-    </div>
+    <button class="btn" style="background:#3498db" onclick="openWebCamera()">📸 Take Fabric Photo</button>
     
+    <img id="photo-preview">
     <button class="btn" id="sync-btn" onclick="uploadData()">Confirm & Sync to Cloud</button>
-    
     <button class="btn" style="background:#95a5a6; margin-top:10px;" onclick="resetSystem()">🔄 Reset / Next Scan</button>
 </div>
 
-<div class="log-status" id="status">System Standby (Offline Ready)</div>
+<div id="camera-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:#000; z-index:999; flex-direction:column;">
+    <video id="web-cam-vid" autoplay playsinline style="width:100%; flex-grow:1; object-fit:cover;"></video>
+    <div style="height:120px; display:flex; justify-content:space-evenly; align-items:center; background:#111; padding-bottom:20px;">
+        <button onclick="closeWebCamera()" style="background:#e74c3c; color:white; border:none; padding:15px 30px; border-radius:8px; font-size:16px;">Cancel</button>
+        <button onclick="takeWebSnap()" style="background:#27ae60; color:white; border:none; padding:15px 40px; border-radius:8px; font-size:18px; font-weight:bold;">📸 Snap Photo</button>
+    </div>
+</div>
 
+<div class="log-status" id="status">System Standby (Offline Ready)</div>
 <script>
     let currentItem = null;
     let base64Image = null;
-    let isManualMode = false; // 標記目前是否為手動模式
+    let isManualMode = false;
+    let webCamStream = null;
+    let isScannerRunning = false; // 🛡️ 新增：追蹤掃描器硬體狀態
     
-    // 請確認這是您最新的 GAS 網址 (如果之前有變動，請在這裡更新)
+    // 請確認 GAS 網址是否正確
     const GAS_URL = "https://script.google.com/macros/s/AKfycby1aot6Tp1n4JonqL2zXrNypt3kgbSGvEawUfD7JpUnH9HNjiR9_V0Zs5LfPDQOiPRB/exec"; 
 
-    // 初始化掃描器
     const scanner = new Html5Qrcode("reader");
     
-    // 啟動相機
+    // 🛡️ 安全啟動掃描器
     function startScanner() {
+        if (isScannerRunning) return; // 避免重複啟動導致當機
         scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan)
-        .catch(err => {
-            console.log("Scanner info: " + err);
-        });
+        .then(() => { isScannerRunning = true; })
+        .catch(err => { console.log("Scanner start err: " + err); });
+    }
+
+    // 🛡️ 安全停止掃描器
+    function stopScannerSafe() {
+        if (isScannerRunning) {
+            scanner.stop().then(() => { isScannerRunning = false; }).catch(err => console.log(err));
+        }
     }
     
-    // 頁面載入時自動啟動掃描
     startScanner();
 
     function onScan(text) {
         if (!text.includes("FORMOSA TAFFETA")) return;
-
         let parts;
-        // 兼容舊版 (#) 與新版 (^) 格式
-        if (text.includes('^')) {
-            parts = text.split('^'); 
-        } else if (text.includes('#')) {
-            parts = text.split('#'); 
-        } else {
-            return; 
-        }
+        if (text.includes('^')) parts = text.split('^'); 
+        else if (text.includes('#')) parts = text.split('#'); 
+        else return; 
 
         const clean = (str) => str ? str.trim() : "";
-
-        // 設定掃描到的資料
         currentItem = {
             item: `${clean(parts[1])}-${clean(parts[2])}`,
             seq: clean(parts[3]),
@@ -111,92 +107,91 @@
         showResultCard();
     }
 
-    // 啟動手動輸入模式
     function enableManualMode() {
-        // 暫停掃描器以節省資源 (如果正在執行)
-        try { scanner.stop(); } catch(e) {}
-        document.getElementById('scan-container').style.display = 'none'; // 隱藏掃描畫面
-        
+        stopScannerSafe(); // 確保關閉鏡頭
+        document.getElementById('scan-container').style.display = 'none';
         isManualMode = true;
-        
-        // 顯示結果卡片，但插入輸入框
         document.getElementById('result-card').style.display = 'block';
         document.getElementById('data-display').innerHTML = `
-            <div style="font-size:1.1em; color:#f39c12; margin-bottom:10px;">
-                <b>✍️ Manual Input Mode</b>
-            </div>
+            <div style="font-size:1.1em; color:#f39c12; margin-bottom:10px;"><b>✍️ Manual Input Mode</b></div>
             <input type="text" id="manual-item" class="manual-input" placeholder="Item No. (e.g. U6817)">
             <input type="text" id="manual-remark" placeholder="Note / Remark">
         `;
     }
 
-    // 顯示掃描結果的 UI 函數
     function showResultCard() {
-        // 隱藏掃描器
         document.getElementById('scan-container').style.display = 'none';
-        try { scanner.stop(); } catch(e) {}
-
+        stopScannerSafe(); // 確保關閉鏡頭
         document.getElementById('result-card').style.display = 'block';
         document.getElementById('data-display').innerHTML = `
-            <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;">
-                <b>ITEM:</b> ${currentItem.item}
-            </div>
+            <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;"><b>ITEM:</b> ${currentItem.item}</div>
             <b>SEQ:</b> ${currentItem.seq} <br>
             <b>Spec:</b> ${currentItem.width}", ${currentItem.gsm}g/m², ${currentItem.gyd}g/y <br>
             <b>Content:</b> ${currentItem.content} <br>
-            <div style="margin-top:5px; color:#e67e22; font-size:0.9em;">
-                <b>Remark:</b> ${currentItem.remark}
-            </div>
+            <div style="margin-top:5px; color:#e67e22; font-size:0.9em;"><b>Remark:</b> ${currentItem.remark}</div>
         `;
     }
 
-    function triggerCamera() { document.getElementById('cam-input').click(); }
+    async function openWebCamera() {
+        stopScannerSafe(); // 切換到拍照相機前，一定要徹底放開條碼相機
+        document.getElementById('camera-modal').style.display = 'flex';
+        try {
+            webCamStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+            document.getElementById('web-cam-vid').srcObject = webCamStream;
+        } catch (err) {
+            alert("Camera access failed: " + err);
+            closeWebCamera();
+        }
+    }
 
-    document.getElementById('cam-input').onchange = function(e) {
-        const file = e.target.files[0];
-        const reader = new FileReader();
-        reader.onload = function(f) {
-            base64Image = f.target.result;
-            const img = document.getElementById('photo-preview');
+    function takeWebSnap() {
+        const vid = document.getElementById('web-cam-vid');
+        const canvas = document.createElement('canvas');
+        canvas.width = vid.videoWidth / 2;
+        canvas.height = vid.videoHeight / 2;
+        canvas.getContext('2d').drawImage(vid, 0, 0, canvas.width, canvas.height);
+        
+        base64Image = canvas.toDataURL('image/jpeg', 0.7);
+        
+        const img = document.getElementById('photo-preview');
+        if(img) {
             img.src = base64Image;
             img.style.display = 'block';
-        };
-        reader.readAsDataURL(file);
-    };
+        }
+        closeWebCamera();
+    }
 
-    // 🏆 修改後的上傳與畫面狀態控制邏輯
+    function closeWebCamera() {
+        if (webCamStream) {
+            webCamStream.getTracks().forEach(track => track.stop());
+            webCamStream = null;
+        }
+        document.getElementById('camera-modal').style.display = 'none';
+    }
+
     async function uploadData() {
         const status = document.getElementById('status');
         let payload = {};
 
-        // 判斷是手動輸入還是掃描資料
         if (isManualMode) {
-            const mItem = document.getElementById('manual-item').value;
+            const mItem = document.getElementById('manual-item') ? document.getElementById('manual-item').value : "";
             if (!mItem && !base64Image) {
-                // 替換手動輸入沒填資料的 alert
                 status.innerHTML = "<span style='color: #e74c3c; font-weight: bold;'>⚠️ Please enter Item No or take a photo.</span>";
                 setTimeout(() => { status.innerText = "Ready for input"; }, 2000);
                 return;
             }
-            
             payload = {
-                item: mItem || "No-Item-Code",
-                seq: "",
-                width: "",
-                gsm: "",
-                gyd: "",
-                content: "",
-                remark: document.getElementById('manual-remark').value || "Manual Input",
-                theme: document.getElementById('theme').value || "Untagged",
-                client: document.getElementById('client').value || "General",
+                item: mItem || "No-Item-Code", seq: "", width: "", gsm: "", gyd: "", content: "",
+                remark: document.getElementById('manual-remark') ? document.getElementById('manual-remark').value : "Manual Input",
+                theme: document.getElementById('theme') ? document.getElementById('theme').value : "Untagged",
+                client: document.getElementById('client') ? document.getElementById('client').value : "General",
                 image: base64Image
             };
         } else {
-            // 掃描模式
             payload = {
                 ...currentItem,
-                theme: document.getElementById('theme').value || "Untagged",
-                client: document.getElementById('client').value || "General",
+                theme: document.getElementById('theme') ? document.getElementById('theme').value : "Untagged",
+                client: document.getElementById('client') ? document.getElementById('client').value : "General",
                 image: base64Image
             };
         }
@@ -205,37 +200,39 @@
         
         try {
             const response = await fetch(GAS_URL, {
-                method: 'POST',
-                mode: 'no-cors',
-                body: JSON.stringify(payload)
+                method: 'POST', mode: 'no-cors', body: JSON.stringify(payload)
             });
-            // 替換傳送成功的 alert，改為文字並延遲 1.5 秒自動重置
             status.innerHTML = "<span style='color: #27ae60; font-weight: bold;'>✅ Data & Photo Sent!</span>";
-            setTimeout(() => { resetSystem(); }, 1500); 
-
+            setTimeout(() => { resetSystem(); }, 1500);  // 確保 1.5 秒後執行重置
         } catch (err) {
             localStorage.setItem('offline_item', JSON.stringify(payload));
-            // 替換離線儲存的 alert，改為文字並延遲 1.5 秒自動重置
             status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache!</span>";
             setTimeout(() => { resetSystem(); }, 1500);
         }
     }
 
     function resetSystem() {
-        // 重置所有變數與介面
-        currentItem = null;
-        base64Image = null;
-        isManualMode = false;
-        
-        document.getElementById('result-card').style.display = 'none';
-        document.getElementById('photo-preview').style.display = 'none';
-        document.getElementById('scan-container').style.display = 'block'; // 重新顯示掃描器
-        document.getElementById('status').innerText = "Ready for next scan";
-        
-        // 重新啟動掃描器
-        startScanner();
+        // 🛡️ 使用 try-catch 包覆，避免任何介面遺失導致的隱形當機
+        try {
+            currentItem = null; 
+            base64Image = null; 
+            isManualMode = false;
+            
+            const resCard = document.getElementById('result-card');
+            if(resCard) resCard.style.display = 'none';
+            
+            const preview = document.getElementById('photo-preview');
+            if(preview) preview.style.display = 'none';
+            
+            const scanCont = document.getElementById('scan-container');
+            if(scanCont) scanCont.style.display = 'block'; 
+            
+            const stat = document.getElementById('status');
+            if(stat) stat.innerText = "Ready for next scan";
+            
+            startScanner(); // 安全重啟掃描器
+        } catch (err) {
+            console.log("Reset Error: " + err);
+        }
     }
 </script>
-</body>
-</html>
-
