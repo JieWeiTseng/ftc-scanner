@@ -6,7 +6,7 @@
     <title>FTC-Link Pro v1.2</title>
     <link rel="icon" type="image/png" href="ftc_icon.png">
     <link rel="apple-touch-icon" href="ftc_icon.png">  
-    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" integrity="sha384-c9d8RFSL+u3exBOJ4Yp3HUJXS4znl9f+z66d1y54ig+ea249SpqR+w1wyvXz/lk+" crossorigin="anonymous"></script>
     <style>
         :root { --primary: #2c3e50; --accent: #27ae60; --danger: #e74c3c; --warning: #f39c12; }
         body { font-family: -apple-system, sans-serif; margin: 0; background: #f8f9fa; color: #333; }
@@ -35,6 +35,7 @@
 <div id="scan-container">
     <div id="reader"></div>
     <div style="text-align: center;">
+        <button class="btn" id="cam-btn" style="background:#34495e" onclick="restartScanner('button')">🔄 Restart Camera</button>
         <button class="btn manual-btn" onclick="enableManualMode()">📝 No QR Code (Manual Input)</button>
     </div>
 </div>
@@ -63,42 +64,197 @@
     let base64Image = null;
     let isManualMode = false;
     let webCamStream = null;
-    let isScannerRunning = false; 
     
     // 請確認 GAS 網址是否正確
     const GAS_URL = "https://script.google.com/macros/s/AKfycby1aot6Tp1n4JonqL2zXrNypt3kgbSGvEawUfD7JpUnH9HNjiR9_V0Zs5LfPDQOiPRB/exec"; 
 
-    const scanner = new Html5Qrcode("reader");
-    
-    function startScanner() {
-        if (isScannerRunning) return; 
-        scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan)
-        .then(() => { isScannerRunning = true; })
-        .catch(err => { console.log("Scanner start err: " + err); });
+    // 手機螢幕關掉、切到別的 App、或鏡頭開太久時，系統會切斷或凍結鏡頭畫面 (黑屏)。
+    // html5-qrcode 不會發現，所以這裡自己檢查並重開。
+    const IDLE_MS = window.FTC_IDLE_MS || 90000;  // 90 秒沒掃到就關鏡頭，省電也不過熱
+    const WATCHDOG_MS = 3000;                     // 每 3 秒檢查一次畫面還在動
+
+    // 只解 QR (不試其他十幾種條碼)，省 CPU、少發熱
+    const SCANNER_CONFIG = { formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE], verbose: false };
+    // 吊牌是後鏡頭拍印刷 QR，不需要再掃一次鏡像畫面 (預設每張沒讀到的畫面都會鏡像重掃一次)
+    const SCAN_SETTINGS = { fps: 10, qrbox: 250, disableFlip: true };
+
+    let scanner = new Html5Qrcode("reader", SCANNER_CONFIG);
+    let wantScanning = false;   // 掃描畫面應該要有鏡頭
+    let scanHandled = false;    // 同一張 QR 連續被讀到好幾次，只處理第一次
+    let idleTimer = null;
+    let watchdogTimer = null;
+    let photoTimer = null;
+    let camQueue = Promise.resolve();
+
+    // 開關鏡頭排隊一個一個來：html5-qrcode 遇到兩個動作重疊會卡死在 transition 狀態
+    function camOp(fn) {
+        camQueue = camQueue.then(fn).catch(err => console.log("Camera op err: " + err));
+        return camQueue;
     }
 
-    // 🏆 修復關鍵 1：把停止掃描器變成「非同步(async)」，並強迫等待 0.3 秒讓硬體釋放鏡頭
-    async function stopScannerSafe() {
-        if (isScannerRunning) {
-            try {
-                await scanner.stop();
-                isScannerRunning = false;
-                // 強制等待 300 毫秒，確保 Android 系統徹底放開鏡頭硬體
-                await new Promise(resolve => setTimeout(resolve, 300));
-            } catch (err) {
-                console.log("Stop scanner err: " + err);
-            }
-        }
+    function withTimeout(promise, ms, what) {
+        return Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(what + " timed out"), ms))]);
     }
+
+    function scannerIsOn() {
+        return scanner.getState() !== Html5QrcodeScannerState.NOT_STARTED;
+    }
+
+    function setStatus(html) {
+        document.getElementById('status').innerHTML = html;
+    }
+
+    // 卡住的掃描器整個換掉：關掉它的鏡頭、清空畫面、建新的
+    function hardResetScanner() {
+        const old = scanner;
+        old.shouldScan = false;
+        clearTimeout(old.foreverScanTimeout);
+        const vid = document.querySelector('#reader video');
+        if (vid && vid.srcObject) vid.srcObject.getTracks().forEach(track => track.stop());
+        document.getElementById('reader').innerHTML = '';
+        scanner = new Html5Qrcode("reader", SCANNER_CONFIG);
+    }
+    
+    // 只有掃描畫面露出來時才開鏡頭；手動輸入或結果卡片時開了，鏡頭會藏在背後一直開著
+    function onScanScreen() {
+        return document.getElementById('scan-container').style.display !== 'none';
+    }
+
+    function startScanner() {
+        if (!onScanScreen()) return camQueue;
+        wantScanning = true;
+        return camOp(async () => {
+            if (!wantScanning || !onScanScreen() || document.hidden || scannerIsOn()) return;
+            let starting = null;
+            try {
+                starting = scanner.start({ facingMode: "environment" }, SCAN_SETTINGS, onScan);
+                await withTimeout(starting, 10000, "start");
+            } catch (err) {
+                console.log("Scanner start err: " + err);
+                // 晚到的鏡頭也要關掉，不然會一直佔著
+                const old = scanner;
+                if (starting) starting.then(() => old.stop()).catch(() => {});
+                hardResetScanner();
+                holdScreen(false);
+                setStatus("<span style='color: #e74c3c;'>Camera did not start. Close other camera apps, then tap Restart Camera.</span>");
+                return;
+            }
+            // 等鏡頭的這段時間，使用者可能已經離開掃描畫面或切到背景：馬上關掉
+            if (!wantScanning || !onScanScreen() || document.hidden) {
+                await stopCamera();
+                return;
+            }
+            scanHandled = false;
+            setStatus("Ready to scan");
+            armIdleTimer();
+            startWatchdog();
+            holdScreen(true);
+        });
+    }
+
+    // 真正關鏡頭的步驟，只在 camOp 排隊裡跑，所以計時器和螢幕鎖一定跟著鏡頭一起收
+    async function stopCamera() {
+        clearTimeout(idleTimer);
+        clearInterval(watchdogTimer);
+        holdScreen(false);
+        if (!scannerIsOn()) return;
+        try {
+            await withTimeout(scanner.stop(), 5000, "stop");
+        } catch (err) {
+            console.log("Stop scanner err: " + err);
+            hardResetScanner();
+        }
+        // 等 300 毫秒，讓 Android 徹底放開鏡頭硬體
+        await new Promise(resolve => setTimeout(resolve, 300));
+    }
+
+    function stopScanner(keepWanted) {
+        if (!keepWanted) wantScanning = false;
+        clearTimeout(idleTimer);
+        clearInterval(watchdogTimer);
+        return camOp(stopCamera);
+    }
+
+    function restartScanner(reason) {
+        console.log("Restart camera: " + reason);
+        stopScanner(true);
+        return startScanner();
+    }
+
+    // 畫面結束、靜音或不動超過兩次檢查 (約 6 秒)，就重開鏡頭
+    function startWatchdog() {
+        clearInterval(watchdogTimer);
+        let lastTime = -1;
+        let strikes = 0;
+        watchdogTimer = setInterval(() => {
+            if (!wantScanning || document.hidden) return;
+            const vid = document.querySelector('#reader video');
+            const track = vid && vid.srcObject ? vid.srcObject.getVideoTracks()[0] : null;
+            if (!track || track.readyState !== 'live') {
+                restartScanner("camera feed ended");
+                return;
+            }
+            const frozen = vid.paused || track.muted || vid.currentTime === lastTime;
+            lastTime = vid.currentTime;
+            strikes = frozen ? strikes + 1 : 0;
+            if (strikes >= 2) restartScanner("camera feed frozen");
+        }, WATCHDOG_MS);
+    }
+
+    function armIdleTimer() {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+            stopScanner();
+            setStatus("Camera paused to save battery. Tap Restart Camera to scan.");
+        }, IDLE_MS);
+    }
+
+    // 掃描中不讓螢幕自己暗掉 (鎖屏會切斷鏡頭)；鏡頭一關就放掉，螢幕照常休眠
+    // 要鎖和放鎖也排隊：連按 Restart 時才不會同時申請好幾個鎖、放掉一個還剩別的
+    let wakeLock = null;
+    let wakeWanted = false;
+    let wakeQueue = Promise.resolve();
+    function holdScreen(on) {
+        wakeWanted = on;
+        wakeQueue = wakeQueue.then(async () => {
+            try {
+                if (wakeWanted && !wakeLock && 'wakeLock' in navigator && !document.hidden) {
+                    const lock = await navigator.wakeLock.request('screen');
+                    lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+                    wakeLock = lock;
+                }
+                if (!wakeWanted && wakeLock) {
+                    const lock = wakeLock;
+                    wakeLock = null;
+                    await lock.release();
+                }
+            } catch (err) {
+                console.log("Wake lock err: " + err);
+            }
+        });
+        return wakeQueue;
+    }
+
+    // 螢幕關掉或切到背景就放開鏡頭，回來再開
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            closeWebCamera();
+            if (wantScanning) stopScanner(true);
+        } else if (wantScanning) {
+            startScanner();
+        }
+    });
     
     startScanner();
 
     function onScan(text) {
+        if (scanHandled) return;
         if (!text.includes("FORMOSA TAFFETA")) return;
         let parts;
         if (text.includes('^')) parts = text.split('^'); 
         else if (text.includes('#')) parts = text.split('#'); 
         else return; 
+        scanHandled = true;
 
         const clean = (str) => str ? str.trim() : "";
         currentItem = {
@@ -115,9 +271,8 @@
         showResultCard();
     }
 
-    // 🏆 修復關鍵 2：切換手動模式時，等待鏡頭關閉
     async function enableManualMode() {
-        await stopScannerSafe(); 
+        await stopScanner();
         document.getElementById('scan-container').style.display = 'none';
         isManualMode = true;
         document.getElementById('result-card').style.display = 'block';
@@ -128,36 +283,51 @@
         `;
     }
 
-    // 🏆 修復關鍵 3：顯示結果卡片時，等待鏡頭關閉
     async function showResultCard() {
         document.getElementById('scan-container').style.display = 'none';
-        await stopScannerSafe(); 
+        await stopScanner();
         document.getElementById('result-card').style.display = 'block';
+        // QR 內容是外來文字，轉義後才放進 HTML
+        const esc = (str) => String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         document.getElementById('data-display').innerHTML = `
-            <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;"><b>ITEM:</b> ${currentItem.item}</div>
-            <b>SEQ:</b> ${currentItem.seq} <br>
-            <b>Spec:</b> ${currentItem.width}", ${currentItem.gsm}g/m², ${currentItem.gyd}g/y <br>
-            <b>Content:</b> ${currentItem.content} <br>
-            <div style="margin-top:5px; color:#e67e22; font-size:0.9em;"><b>Remark:</b> ${currentItem.remark}</div>
+            <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;"><b>ITEM:</b> ${esc(currentItem.item)}</div>
+            <b>SEQ:</b> ${esc(currentItem.seq)} <br>
+            <b>Spec:</b> ${esc(currentItem.width)}", ${esc(currentItem.gsm)}g/m², ${esc(currentItem.gyd)}g/y <br>
+            <b>Content:</b> ${esc(currentItem.content)} <br>
+            <div style="margin-top:5px; color:#e67e22; font-size:0.9em;"><b>Remark:</b> ${esc(currentItem.remark)}</div>
         `;
     }
 
-    // 🏆 修復關鍵 4：開啟拍照前，確保條碼機已完全釋放鏡頭
+    // 開啟拍照前，確保條碼機已完全釋放鏡頭
+    let openingPhotoCam = false;
     async function openWebCamera() {
-        await stopScannerSafe(); 
-        document.getElementById('camera-modal').style.display = 'flex';
+        if (openingPhotoCam || webCamStream) return;   // 連按兩下只開一個鏡頭
+        openingPhotoCam = true;
         try {
-            webCamStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+            await stopScanner();
+            const modal = document.getElementById('camera-modal');
+            modal.style.display = 'flex';
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+            // 等鏡頭的時候已經按了 Cancel、切到背景或回到首頁：直接關掉，不要在背後開著
+            if (modal.style.display === 'none' || document.hidden) {
+                stream.getTracks().forEach(track => track.stop());
+                return;
+            }
+            webCamStream = stream;
             document.getElementById('web-cam-vid').srcObject = webCamStream;
+            clearTimeout(photoTimer);
+            photoTimer = setTimeout(closeWebCamera, IDLE_MS);
         } catch (err) {
-            // 如果還是搶不到鏡頭，顯示錯誤訊息在畫面上
-            document.getElementById('status').innerHTML = "<span style='color: #e74c3c;'>Camera locked by system. Please restart APP.</span>";
-            setTimeout(closeWebCamera, 2000);
+            setStatus("<span style='color: #e74c3c;'>Camera busy. Close other camera apps, then tap Take Fabric Photo again.</span>");
+            closeWebCamera();
+        } finally {
+            openingPhotoCam = false;
         }
     }
 
     function takeWebSnap() {
         const vid = document.getElementById('web-cam-vid');
+        if (!vid.videoWidth) return;   // 鏡頭還沒出畫面，拍下去會是空白圖
         const canvas = document.createElement('canvas');
         canvas.width = vid.videoWidth / 2;
         canvas.height = vid.videoHeight / 2;
@@ -174,10 +344,12 @@
     }
 
     function closeWebCamera() {
+        clearTimeout(photoTimer);
         if (webCamStream) {
             webCamStream.getTracks().forEach(track => track.stop());
             webCamStream = null;
         }
+        document.getElementById('web-cam-vid').srcObject = null;
         document.getElementById('camera-modal').style.display = 'none';
     }
 
@@ -208,6 +380,8 @@
             };
         }
 
+        // 連按兩下只送一次
+        document.getElementById('sync-btn').disabled = true;
         status.innerHTML = "<span style='color: #3498db; font-weight: bold;'>⏳ Connecting to Cloud...</span>";
         
         try {
@@ -217,17 +391,62 @@
             status.innerHTML = "<span style='color: #27ae60; font-weight: bold;'>✅ Data & Photo Sent!</span>";
             setTimeout(() => { resetSystem(); }, 1500);  
         } catch (err) {
-            localStorage.setItem('offline_item', JSON.stringify(payload));
-            status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache!</span>";
-            setTimeout(() => { resetSystem(); }, 1500);
+            if (saveOffline(payload)) {
+                status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache! It uploads when the phone is back online.</span>";
+                setTimeout(() => { resetSystem(); }, 1500);
+            } else {
+                // 存不下：留在這張卡，讓使用者有網路時再按一次
+                status.innerHTML = "<span style='color: #e74c3c; font-weight: bold;'>⚠️ Offline and phone storage is full. Not saved, tap Sync again when online.</span>";
+                document.getElementById('sync-btn').disabled = false;
+            }
         }
     }
+
+    // 離線時一筆一筆排隊存，上線後自動補傳 (舊版只存一筆，下一筆會蓋掉，也從不補傳)
+    function saveOffline(payload) {
+        try {
+            const queue = JSON.parse(localStorage.getItem('offline_queue') || '[]');
+            queue.push(payload);
+            localStorage.setItem('offline_queue', JSON.stringify(queue));
+            return true;
+        } catch (err) {
+            console.log("Offline save err: " + err);
+            return false;
+        }
+    }
+
+    let flushing = false;
+    async function flushOffline() {
+        if (flushing) return;
+        flushing = true;
+        const readQueue = () => JSON.parse(localStorage.getItem('offline_queue') || '[]');
+        try {
+            const old = localStorage.getItem('offline_item');   // v1.2 留下的那一筆
+            if (old && saveOffline(JSON.parse(old))) localStorage.removeItem('offline_item');
+            // 每送一筆都重讀一次：送的時候可能又有新的存進來，不能拿舊的清單蓋回去
+            let next;
+            while ((next = readQueue()[0])) {
+                await fetch(GAS_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify(next) });
+                const sent = JSON.stringify(next);
+                const rest = readQueue();
+                const i = rest.findIndex(entry => JSON.stringify(entry) === sent);
+                if (i >= 0) rest.splice(i, 1);
+                localStorage.setItem('offline_queue', JSON.stringify(rest));
+            }
+        } catch (err) {
+            console.log("Offline flush stopped: " + err);   // 還是離線，下次上線再傳
+        }
+        flushing = false;
+    }
+    window.addEventListener('online', flushOffline);
+    flushOffline();
 
     function resetSystem() {
         try {
             currentItem = null; 
             base64Image = null; 
             isManualMode = false;
+            document.getElementById('sync-btn').disabled = false;
             
             const resCard = document.getElementById('result-card');
             if(resCard) resCard.style.display = 'none';
@@ -241,6 +460,7 @@
             const stat = document.getElementById('status');
             if(stat) stat.innerText = "Ready for next scan";
             
+            closeWebCamera();   // 拍照鏡頭還開著就先關，不然會和掃描鏡頭同時開
             // 重要：回到首頁時重新啟動條碼掃描器
             setTimeout(() => { startScanner(); }, 500);
             
