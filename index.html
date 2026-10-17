@@ -193,22 +193,29 @@
     }
 
     // 掃描中不讓螢幕自己暗掉 (鎖屏會切斷鏡頭)；鏡頭一關就放掉，螢幕照常休眠
+    // 要鎖和放鎖也排隊：連按 Restart 時才不會同時申請好幾個鎖、放掉一個還剩別的
     let wakeLock = null;
-    async function holdScreen(on) {
-        try {
-            if (on && !wakeLock && 'wakeLock' in navigator && !document.hidden) {
-                const lock = await navigator.wakeLock.request('screen');
-                if (!wantScanning) { lock.release(); return; }
-                wakeLock = lock;
-                lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
-            } else if (!on && wakeLock) {
-                const lock = wakeLock;
-                wakeLock = null;
-                await lock.release();
+    let wakeWanted = false;
+    let wakeQueue = Promise.resolve();
+    function holdScreen(on) {
+        wakeWanted = on;
+        wakeQueue = wakeQueue.then(async () => {
+            try {
+                if (wakeWanted && !wakeLock && 'wakeLock' in navigator && !document.hidden) {
+                    const lock = await navigator.wakeLock.request('screen');
+                    lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+                    wakeLock = lock;
+                }
+                if (!wakeWanted && wakeLock) {
+                    const lock = wakeLock;
+                    wakeLock = null;
+                    await lock.release();
+                }
+            } catch (err) {
+                console.log("Wake lock err: " + err);
             }
-        } catch (err) {
-            console.log("Wake lock err: " + err);
-        }
+        });
+        return wakeQueue;
     }
 
     // 螢幕關掉或切到背景就放開鏡頭，回來再開
