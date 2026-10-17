@@ -6,7 +6,7 @@
     <title>FTC-Link Pro v1.2</title>
     <link rel="icon" type="image/png" href="ftc_icon.png">
     <link rel="apple-touch-icon" href="ftc_icon.png">  
-    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" integrity="sha384-c9d8RFSL+u3exBOJ4Yp3HUJXS4znl9f+z66d1y54ig+ea249SpqR+w1wyvXz/lk+" crossorigin="anonymous"></script>
     <style>
         :root { --primary: #2c3e50; --accent: #27ae60; --danger: #e74c3c; --warning: #f39c12; }
         body { font-family: -apple-system, sans-serif; margin: 0; background: #f8f9fa; color: #333; }
@@ -73,7 +73,12 @@
     const IDLE_MS = window.FTC_IDLE_MS || 90000;  // 90 秒沒掃到就關鏡頭，省電也不過熱
     const WATCHDOG_MS = 3000;                     // 每 3 秒檢查一次畫面還在動
 
-    let scanner = new Html5Qrcode("reader");
+    // 只解 QR (不試其他十幾種條碼)，省 CPU、少發熱
+    const SCANNER_CONFIG = { formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE], verbose: false };
+    // 吊牌是後鏡頭拍印刷 QR，不需要再掃一次鏡像畫面 (預設每張沒讀到的畫面都會鏡像重掃一次)
+    const SCAN_SETTINGS = { fps: 10, qrbox: 250, disableFlip: true };
+
+    let scanner = new Html5Qrcode("reader", SCANNER_CONFIG);
     let wantScanning = false;   // 掃描畫面應該要有鏡頭
     let scanHandled = false;    // 同一張 QR 連續被讀到好幾次，只處理第一次
     let idleTimer = null;
@@ -107,7 +112,7 @@
         const vid = document.querySelector('#reader video');
         if (vid && vid.srcObject) vid.srcObject.getTracks().forEach(track => track.stop());
         document.getElementById('reader').innerHTML = '';
-        scanner = new Html5Qrcode("reader");
+        scanner = new Html5Qrcode("reader", SCANNER_CONFIG);
     }
     
     function startScanner() {
@@ -116,7 +121,7 @@
             if (!wantScanning || document.hidden || scannerIsOn()) return;
             let starting = null;
             try {
-                starting = scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScan);
+                starting = scanner.start({ facingMode: "environment" }, SCAN_SETTINGS, onScan);
                 await withTimeout(starting, 10000, "start");
             } catch (err) {
                 console.log("Scanner start err: " + err);
@@ -131,6 +136,7 @@
             setStatus("Ready to scan");
             armIdleTimer();
             startWatchdog();
+            holdScreen(true);
         });
     }
 
@@ -138,6 +144,7 @@
         if (!keepWanted) wantScanning = false;
         clearTimeout(idleTimer);
         clearInterval(watchdogTimer);
+        holdScreen(false);
         return camOp(async () => {
             if (!scannerIsOn()) return;
             try {
@@ -183,6 +190,25 @@
             stopScanner();
             setStatus("Camera paused to save battery. Tap Restart Camera to scan.");
         }, IDLE_MS);
+    }
+
+    // 掃描中不讓螢幕自己暗掉 (鎖屏會切斷鏡頭)；鏡頭一關就放掉，螢幕照常休眠
+    let wakeLock = null;
+    async function holdScreen(on) {
+        try {
+            if (on && !wakeLock && 'wakeLock' in navigator && !document.hidden) {
+                const lock = await navigator.wakeLock.request('screen');
+                if (!wantScanning) { lock.release(); return; }
+                wakeLock = lock;
+                lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+            } else if (!on && wakeLock) {
+                const lock = wakeLock;
+                wakeLock = null;
+                await lock.release();
+            }
+        } catch (err) {
+            console.log("Wake lock err: " + err);
+        }
     }
 
     // 螢幕關掉或切到背景就放開鏡頭，回來再開
@@ -237,12 +263,14 @@
         document.getElementById('scan-container').style.display = 'none';
         await stopScanner();
         document.getElementById('result-card').style.display = 'block';
+        // QR 內容是外來文字，轉義後才放進 HTML
+        const esc = (str) => String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         document.getElementById('data-display').innerHTML = `
-            <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;"><b>ITEM:</b> ${currentItem.item}</div>
-            <b>SEQ:</b> ${currentItem.seq} <br>
-            <b>Spec:</b> ${currentItem.width}", ${currentItem.gsm}g/m², ${currentItem.gyd}g/y <br>
-            <b>Content:</b> ${currentItem.content} <br>
-            <div style="margin-top:5px; color:#e67e22; font-size:0.9em;"><b>Remark:</b> ${currentItem.remark}</div>
+            <div style="font-size:1.1em; color:#2c3e50; margin-bottom:5px;"><b>ITEM:</b> ${esc(currentItem.item)}</div>
+            <b>SEQ:</b> ${esc(currentItem.seq)} <br>
+            <b>Spec:</b> ${esc(currentItem.width)}", ${esc(currentItem.gsm)}g/m², ${esc(currentItem.gyd)}g/y <br>
+            <b>Content:</b> ${esc(currentItem.content)} <br>
+            <div style="margin-top:5px; color:#e67e22; font-size:0.9em;"><b>Remark:</b> ${esc(currentItem.remark)}</div>
         `;
     }
 
@@ -270,6 +298,7 @@
 
     function takeWebSnap() {
         const vid = document.getElementById('web-cam-vid');
+        if (!vid.videoWidth) return;   // 鏡頭還沒出畫面，拍下去會是空白圖
         const canvas = document.createElement('canvas');
         canvas.width = vid.videoWidth / 2;
         canvas.height = vid.videoHeight / 2;
@@ -322,6 +351,8 @@
             };
         }
 
+        // 連按兩下只送一次
+        document.getElementById('sync-btn').disabled = true;
         status.innerHTML = "<span style='color: #3498db; font-weight: bold;'>⏳ Connecting to Cloud...</span>";
         
         try {
@@ -331,17 +362,61 @@
             status.innerHTML = "<span style='color: #27ae60; font-weight: bold;'>✅ Data & Photo Sent!</span>";
             setTimeout(() => { resetSystem(); }, 1500);  
         } catch (err) {
-            localStorage.setItem('offline_item', JSON.stringify(payload));
-            status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache!</span>";
-            setTimeout(() => { resetSystem(); }, 1500);
+            if (saveOffline(payload)) {
+                status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache! It uploads when the phone is back online.</span>";
+                setTimeout(() => { resetSystem(); }, 1500);
+            } else {
+                // 存不下：留在這張卡，讓使用者有網路時再按一次
+                status.innerHTML = "<span style='color: #e74c3c; font-weight: bold;'>⚠️ Offline and phone storage is full. Not saved, tap Sync again when online.</span>";
+                document.getElementById('sync-btn').disabled = false;
+            }
         }
     }
+
+    // 離線時一筆一筆排隊存，上線後自動補傳 (舊版只存一筆，下一筆會蓋掉，也從不補傳)
+    function saveOffline(payload) {
+        try {
+            const queue = JSON.parse(localStorage.getItem('offline_queue') || '[]');
+            queue.push(payload);
+            localStorage.setItem('offline_queue', JSON.stringify(queue));
+            return true;
+        } catch (err) {
+            console.log("Offline save err: " + err);
+            return false;
+        }
+    }
+
+    let flushing = false;
+    async function flushOffline() {
+        if (flushing) return;
+        flushing = true;
+        try {
+            const queue = JSON.parse(localStorage.getItem('offline_queue') || '[]');
+            const old = localStorage.getItem('offline_item');   // v1.2 留下的那一筆
+            if (old) {
+                queue.unshift(JSON.parse(old));
+                localStorage.setItem('offline_queue', JSON.stringify(queue));
+                localStorage.removeItem('offline_item');
+            }
+            while (queue.length) {
+                await fetch(GAS_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify(queue[0]) });
+                queue.shift();
+                localStorage.setItem('offline_queue', JSON.stringify(queue));
+            }
+        } catch (err) {
+            console.log("Offline flush stopped: " + err);   // 還是離線，下次上線再傳
+        }
+        flushing = false;
+    }
+    window.addEventListener('online', flushOffline);
+    flushOffline();
 
     function resetSystem() {
         try {
             currentItem = null; 
             base64Image = null; 
             isManualMode = false;
+            document.getElementById('sync-btn').disabled = false;
             
             const resCard = document.getElementById('result-card');
             if(resCard) resCard.style.display = 'none';
