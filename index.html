@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FTC-Link Pro v1.4</title>
+    <title>FTC-Link Pro v1.5</title>
     <link rel="icon" type="image/png" href="ftc_icon.png">
     <link rel="apple-touch-icon" href="ftc_icon.png">  
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" integrity="sha384-c9d8RFSL+u3exBOJ4Yp3HUJXS4znl9f+z66d1y54ig+ea249SpqR+w1wyvXz/lk+" crossorigin="anonymous"></script>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<div class="header">FTC-Link Pro v1.4</div>
+<div class="header">FTC-Link Pro v1.5</div>
 
 <div class="panel">
     <input type="text" id="theme" placeholder="Project Theme (e.g. AH27 Burton)">
@@ -54,7 +54,7 @@
     <video id="web-cam-vid" autoplay playsinline style="width:100%; flex-grow:1; object-fit:cover;"></video>
     <div style="height:120px; display:flex; justify-content:space-evenly; align-items:center; background:#111; padding-bottom:20px;">
         <button onclick="closeWebCamera()" style="background:#e74c3c; color:white; border:none; padding:15px 30px; border-radius:8px; font-size:16px;">Cancel</button>
-        <button onclick="takeWebSnap()" style="background:#27ae60; color:white; border:none; padding:15px 40px; border-radius:8px; font-size:18px; font-weight:bold;">📸 Snap Photo</button>
+        <button id="snap-btn" onclick="takeWebSnap()" style="background:#27ae60; color:white; border:none; padding:15px 40px; border-radius:8px; font-size:18px; font-weight:bold;">📸 Snap Photo</button>
     </div>
 </div>
 
@@ -307,7 +307,10 @@
             await stopScanner();
             const modal = document.getElementById('camera-modal');
             modal.style.display = 'flex';
-            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+            // 要大一點的畫面：預設常常只有 640x480
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1440 } }
+            });
             // 等鏡頭的時候已經按了 Cancel、切到背景或回到首頁：直接關掉，不要在背後開著
             if (modal.style.display === 'none' || document.hidden) {
                 stream.getTracks().forEach(track => track.stop());
@@ -315,6 +318,12 @@
             }
             webCamStream = stream;
             document.getElementById('web-cam-vid').srcObject = webCamStream;
+            // 支援的手機改成連續對焦，近拍布面比較不會糊
+            const camTrack = stream.getVideoTracks()[0];
+            const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};
+            if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                camTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+            }
             clearTimeout(photoTimer);
             photoTimer = setTimeout(closeWebCamera, IDLE_MS);
         } catch (err) {
@@ -325,21 +334,62 @@
         }
     }
 
-    function takeWebSnap() {
+    // 照片要清楚：先用 ImageCapture 拍真正的照片 (會對焦、解析度高)，不支援才擷取預覽畫面；
+    // 長邊縮到 1600，JPEG 品質 0.85
+    const PHOTO_MAX = 1600;
+    let snapping = false;
+    async function takeWebSnap() {
         const vid = document.getElementById('web-cam-vid');
-        if (!vid.videoWidth) return;   // 鏡頭還沒出畫面，拍下去會是空白圖
+        if (snapping || !webCamStream || !vid.videoWidth) return;   // 鏡頭還沒出畫面，拍下去會是空白圖
+        snapping = true;
+        // 拍照要一兩秒，按鈕上顯示進度 (狀態列被相機畫面蓋住看不到)
+        const snapBtn = document.getElementById('snap-btn');
+        snapBtn.disabled = true;
+        snapBtn.textContent = "⏳ Taking...";
+        try {
+            await snapPhoto(vid);
+        } finally {
+            snapping = false;
+            snapBtn.disabled = false;
+            snapBtn.textContent = "📸 Snap Photo";
+        }
+    }
+
+    async function snapPhoto(vid) {
+        let source = vid;
+        let width = vid.videoWidth;
+        let height = vid.videoHeight;
+        let bitmap = null;
+        try {
+            if ('ImageCapture' in window) {
+                const blob = await withTimeout(new ImageCapture(webCamStream.getVideoTracks()[0]).takePhoto(), 6000, "takePhoto");
+                bitmap = await createImageBitmap(blob);
+                source = bitmap;
+                width = bitmap.width;
+                height = bitmap.height;
+            }
+        } catch (err) {
+            console.log("takePhoto err, using the preview frame: " + err);
+        }
+        // 拍照時按了 Cancel 或切到背景 (鏡頭已關)：這張不要
+        if (!webCamStream) {
+            if (bitmap) bitmap.close();
+            return;
+        }
+        const scale = Math.min(1, PHOTO_MAX / Math.max(width, height));
         const canvas = document.createElement('canvas');
-        canvas.width = vid.videoWidth / 2;
-        canvas.height = vid.videoHeight / 2;
-        canvas.getContext('2d').drawImage(vid, 0, 0, canvas.width, canvas.height);
-        
-        base64Image = canvas.toDataURL('image/jpeg', 0.7);
-        
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+        canvas.getContext('2d').drawImage(source, 0, 0, canvas.width, canvas.height);
+        if (bitmap) bitmap.close();
+        base64Image = canvas.toDataURL('image/jpeg', 0.85);
+
         const img = document.getElementById('photo-preview');
-        if(img) {
+        if (img) {
             img.src = base64Image;
             img.style.display = 'block';
         }
+        setStatus("Photo ready (" + canvas.width + " x " + canvas.height + ")");
         closeWebCamera();
     }
 
@@ -390,7 +440,7 @@
             const response = await fetch(GAS_URL, { method: 'POST', body: JSON.stringify(payload) });
             reply = await response.text();
         } catch (err) {
-            if (saveOffline(payload)) {
+            if (await saveOffline(payload)) {
                 status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache! It uploads when the phone is back online.</span>";
                 setTimeout(() => { resetSystem(); }, 1500);
             } else {
@@ -412,10 +462,47 @@
         }
     }
 
-    // 離線時一筆一筆排隊存，上線後自動補傳 (舊版只存一筆，下一筆會蓋掉，也從不補傳)
-    function saveOffline(payload) {
+    // 離線時一筆一筆排隊存，上線後自動補傳。照片變大了，所以放 IndexedDB (可存幾百筆)；
+    // 開不了 IndexedDB 才退回 localStorage (約 5 MB，大約十筆有照片的紀錄)
+    const QUEUE_DB = 'ftc-link';
+    const QUEUE_STORE = 'offline';
+    let queueDb = null;
+    function openQueueDb() {
+        if (!queueDb) {
+            queueDb = new Promise((resolve, reject) => {
+                if (!window.indexedDB) return reject("no IndexedDB");
+                const req = indexedDB.open(QUEUE_DB, 1);
+                req.onupgradeneeded = () => req.result.createObjectStore(QUEUE_STORE, { keyPath: 'id', autoIncrement: true });
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            }).catch(err => { console.log("IndexedDB err: " + err); return null; });
+        }
+        return queueDb;
+    }
+
+    // 在一個 transaction 裡跑一個動作，transaction 寫完才算數
+    async function queueTx(mode, action) {
+        const db = await openQueueDb();
+        if (!db) throw new Error("no IndexedDB");
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(QUEUE_STORE, mode);
+            const req = action(tx.objectStore(QUEUE_STORE));
+            tx.oncomplete = () => resolve(req.result);
+            tx.onerror = tx.onabort = () => reject(tx.error);
+        });
+    }
+
+    const readLocalQueue = () => JSON.parse(localStorage.getItem('offline_queue') || '[]');
+
+    async function saveOffline(payload) {
         try {
-            const queue = JSON.parse(localStorage.getItem('offline_queue') || '[]');
+            await queueTx('readwrite', store => store.add({ payload: payload, saved: Date.now() }));
+            return true;
+        } catch (err) {
+            console.log("IndexedDB save err, trying localStorage: " + err);
+        }
+        try {
+            const queue = readLocalQueue();
             queue.push(payload);
             localStorage.setItem('offline_queue', JSON.stringify(queue));
             return true;
@@ -425,26 +512,40 @@
         }
     }
 
+    // 先送 IndexedDB 裡最舊的一筆；空了再送 localStorage 裡舊版 (v1.3、v1.4) 留下的
+    async function nextQueued() {
+        try {
+            const rows = await queueTx('readonly', store => store.getAll(null, 1));
+            if (rows.length) return { id: rows[0].id, payload: rows[0].payload };
+        } catch (err) { /* 沒有 IndexedDB 就只看 localStorage */ }
+        const local = readLocalQueue();
+        return local.length ? { payload: local[0] } : null;
+    }
+
+    async function removeQueued(entry) {
+        if (entry.id !== undefined) return queueTx('readwrite', store => store.delete(entry.id));
+        // 每送一筆都重讀一次：送的時候可能又有新的存進來，不能拿舊的清單蓋回去
+        const sent = JSON.stringify(entry.payload);
+        const rest = readLocalQueue();
+        const i = rest.findIndex(item => JSON.stringify(item) === sent);
+        if (i >= 0) rest.splice(i, 1);
+        localStorage.setItem('offline_queue', JSON.stringify(rest));
+    }
+
     let flushing = false;
     async function flushOffline() {
         if (flushing) return;
         flushing = true;
-        const readQueue = () => JSON.parse(localStorage.getItem('offline_queue') || '[]');
         try {
             const old = localStorage.getItem('offline_item');   // v1.2 留下的那一筆
-            if (old && saveOffline(JSON.parse(old))) localStorage.removeItem('offline_item');
-            // 每送一筆都重讀一次：送的時候可能又有新的存進來，不能拿舊的清單蓋回去
+            if (old && await saveOffline(JSON.parse(old))) localStorage.removeItem('offline_item');
             let next;
-            while ((next = readQueue()[0])) {
-                const response = await fetch(GAS_URL, { method: 'POST', body: JSON.stringify(next) });
+            while ((next = await nextQueued())) {
+                const response = await fetch(GAS_URL, { method: 'POST', body: JSON.stringify(next.payload) });
                 const reply = await response.text();
                 // 表單拒收就先停，這筆留在佇列裡，下次上線再試
                 if (!reply.startsWith("Success")) throw new Error("sheet replied " + reply.slice(0, 80));
-                const sent = JSON.stringify(next);
-                const rest = readQueue();
-                const i = rest.findIndex(entry => JSON.stringify(entry) === sent);
-                if (i >= 0) rest.splice(i, 1);
-                localStorage.setItem('offline_queue', JSON.stringify(rest));
+                await removeQueued(next);
             }
         } catch (err) {
             console.log("Offline flush stopped: " + err);   // 還是離線，下次上線再傳
