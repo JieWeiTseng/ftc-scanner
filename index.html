@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FTC-Link Pro v1.3</title>
+    <title>FTC-Link Pro v1.4</title>
     <link rel="icon" type="image/png" href="ftc_icon.png">
     <link rel="apple-touch-icon" href="ftc_icon.png">  
     <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" integrity="sha384-c9d8RFSL+u3exBOJ4Yp3HUJXS4znl9f+z66d1y54ig+ea249SpqR+w1wyvXz/lk+" crossorigin="anonymous"></script>
@@ -25,7 +25,7 @@
 </head>
 <body>
 
-<div class="header">FTC-Link Pro v1.3</div>
+<div class="header">FTC-Link Pro v1.4</div>
 
 <div class="panel">
     <input type="text" id="theme" placeholder="Project Theme (e.g. AH27 Burton)">
@@ -384,12 +384,11 @@
         document.getElementById('sync-btn').disabled = true;
         status.innerHTML = "<span style='color: #3498db; font-weight: bold;'>⏳ Connecting to Cloud...</span>";
         
+        // 不用 no-cors：Apps Script 會回 "Success" 或 "Error: ..."，讀得到回覆才知道表單有沒有收到
+        let reply;
         try {
-            const response = await fetch(GAS_URL, {
-                method: 'POST', mode: 'no-cors', body: JSON.stringify(payload)
-            });
-            status.innerHTML = "<span style='color: #27ae60; font-weight: bold;'>✅ Data & Photo Sent!</span>";
-            setTimeout(() => { resetSystem(); }, 1500);  
+            const response = await fetch(GAS_URL, { method: 'POST', body: JSON.stringify(payload) });
+            reply = await response.text();
         } catch (err) {
             if (saveOffline(payload)) {
                 status.innerHTML = "<span style='color: #f39c12; font-weight: bold;'>⚠️ Saved to Offline Cache! It uploads when the phone is back online.</span>";
@@ -399,6 +398,17 @@
                 status.innerHTML = "<span style='color: #e74c3c; font-weight: bold;'>⚠️ Offline and phone storage is full. Not saved, tap Sync again when online.</span>";
                 document.getElementById('sync-btn').disabled = false;
             }
+            return;
+        }
+
+        if (reply.startsWith("Success")) {
+            status.innerHTML = "<span style='color: #27ae60; font-weight: bold;'>✅ Data & Photo Sent!</span>";
+            setTimeout(() => { resetSystem(); }, 1500);
+        } else {
+            // 表單拒收：留在這張卡，資料不會丟，可以再按一次 Sync
+            status.innerHTML = "<span style='color: #e74c3c; font-weight: bold;'></span>";
+            status.firstChild.textContent = "⚠️ The sheet did not save this record (" + reply.slice(0, 120) + "). Tap Sync to try again.";
+            document.getElementById('sync-btn').disabled = false;
         }
     }
 
@@ -426,7 +436,10 @@
             // 每送一筆都重讀一次：送的時候可能又有新的存進來，不能拿舊的清單蓋回去
             let next;
             while ((next = readQueue()[0])) {
-                await fetch(GAS_URL, { method: 'POST', mode: 'no-cors', body: JSON.stringify(next) });
+                const response = await fetch(GAS_URL, { method: 'POST', body: JSON.stringify(next) });
+                const reply = await response.text();
+                // 表單拒收就先停，這筆留在佇列裡，下次上線再試
+                if (!reply.startsWith("Success")) throw new Error("sheet replied " + reply.slice(0, 80));
                 const sent = JSON.stringify(next);
                 const rest = readQueue();
                 const i = rest.findIndex(entry => JSON.stringify(entry) === sent);
